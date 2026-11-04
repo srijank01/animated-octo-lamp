@@ -1,0 +1,15 @@
+youtube-transcript-api
+yt-dlp
+google-genai
+pydantic
+python-dotenv
+opencv-python-headless>=4.10.0,<5
+numpy
+Pillow
+faster-whisper
+fastapi
+uvicorn[standard]
+httpx
+google-api-python-client
+google-auth-oauthlib
+google-auth-httplib2
