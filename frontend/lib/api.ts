@@ -8,6 +8,8 @@ export interface EditStats {
   layout_mode: 'single_tracked' | 'split_screen' | 'dynamic_zoom' | 'blurred_background' | string;
   segments_count: number;
   dynamic_zooms_count?: number;
+  hook_strategy?: string;
+  peak_moment?: string;
 }
 
 export interface SocialMetadata {
@@ -24,6 +26,8 @@ export interface Clip {
   clip_index: number;
   title: string;
   hook_text: string;
+  hook_strategy?: string;
+  peak_moment?: string;
   start_time: number;
   end_time: number;
   duration: number;

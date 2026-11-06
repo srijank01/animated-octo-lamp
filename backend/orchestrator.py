@@ -13,7 +13,9 @@ Executes the complete multi-stage pipeline:
 import json
 import logging
 import os
+import shutil
 import subprocess
+import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,7 +23,7 @@ from typing import Any
 
 from backend.database import DEFAULT_DB_PATH, add_clip, update_job
 from backend.pipeline.captions import burn_captions, generate_ass_subtitles
-from backend.pipeline.downloader import download_clip_slice
+from backend.pipeline.downloader import download_clip_slice, extract_video_heatmap_peaks
 from backend.pipeline.llm_hooks import find_viral_clips
 from backend.pipeline.reframer import reframe_to_vertical
 from backend.pipeline.smart_editor import (
@@ -80,6 +82,14 @@ def run_clipping_job(
     for d in [raw_clips_dir, vertical_clips_dir, subtitles_dir, final_clips_dir, previews_dir]:
         d.mkdir(parents=True, exist_ok=True)
 
+    t_job_start = time.time()
+    timing_metrics = {
+        "download": 0.0,
+        "transcription": 0.0,
+        "llm_hooks": 0.0,
+        "ffmpeg": 0.0,
+    }
+
     try:
         # ---------------------------------------------------------
         # STEP 1: Extract Video ID and Transcript (10%)
@@ -96,26 +106,59 @@ def run_clipping_job(
         update_job(job_id, video_id=video_id, db_path=db_path)
 
         logger.info(f"[{job_id}] Fetching transcript for video_id={video_id}")
+        t_tx0 = time.time()
         transcript_segments = get_transcript(video_id)
         formatted_transcript = format_transcript_for_llm(transcript_segments)
+        timing_metrics["transcription"] += (time.time() - t_tx0)
 
         # Save transcript to disk for inspection
         with open(job_dir / "transcript.txt", "w", encoding="utf-8") as f:
             f.write(formatted_transcript)
 
         # ---------------------------------------------------------
+        # STEP 1.5: Extract Audience Heatmap Replay Peaks (Waterfall Priority 1)
+        # ---------------------------------------------------------
+        update_job(
+            job_id,
+            progress_pct=18,
+            current_step="Extracting crowd-sourced retention heatmap & replay peaks...",
+            db_path=db_path,
+        )
+        t_hm0 = time.time()
+        heatmap_peaks = extract_video_heatmap_peaks(source_url)
+        timing_metrics["download"] += (time.time() - t_hm0)
+
+        if heatmap_peaks:
+            logger.info(f"[{job_id}] Extracted {len(heatmap_peaks)} crowd-sourced retention peaks: {[p['display'] for p in heatmap_peaks]}")
+            with open(job_dir / "heatmap_peaks.json", "w", encoding="utf-8") as f:
+                json.dump(heatmap_peaks, f, indent=2)
+        else:
+            logger.info(f"[{job_id}] No retention heatmap available; falling back to Chain-of-Thought Virality Scoring")
+
+        # ---------------------------------------------------------
         # STEP 2: Gemini Viral Hook Selection (25%)
         # ---------------------------------------------------------
+        step_desc = (
+            f"Analyzing transcript & {len(heatmap_peaks)} retention peaks with Gemini (Waterfall Strategy)..."
+            if heatmap_peaks
+            else "Analyzing transcript with Gemini (Chain-of-Thought Virality Scoring)..."
+        )
         update_job(
             job_id,
             status="selecting_hooks",
             progress_pct=25,
-            current_step="Analyzing transcript with Gemini for highest-retention viral hooks...",
+            current_step=step_desc,
             db_path=db_path,
         )
 
-        logger.info(f"[{job_id}] Requesting {num_clips} viral hooks from Gemini")
-        hook_response = find_viral_clips(formatted_transcript, num_clips=num_clips)
+        logger.info(f"[{job_id}] Requesting {num_clips} viral hooks from Gemini using Waterfall Strategy")
+        t_llm0 = time.time()
+        hook_response = find_viral_clips(
+            formatted_transcript,
+            num_clips=num_clips,
+            heatmap_peaks=heatmap_peaks,
+        )
+        timing_metrics["llm_hooks"] += (time.time() - t_llm0)
         viral_clips = hook_response.clips
 
         if not viral_clips:
@@ -151,7 +194,7 @@ def run_clipping_job(
             )
 
             try:
-                # 3A: Narrative Multi-Segment Slicing & Assembly (25% -> 40%)
+                # 3A: Narrative Multi-Segment Slicing & Assembly (Download Phase)
                 slice_pct = int(clip_base_pct + clip_span * 0.15)
                 seg_count = len(clip.segments)
                 step_desc = (
@@ -167,9 +210,12 @@ def run_clipping_job(
                 )
                 raw_path = raw_clips_dir / f"clip_{clip_idx}_raw.mp4"
                 temp_seg_dir = job_dir / f"temp_clip_{clip_idx}"
-                assemble_clip_segments(source_url, clip.segments, raw_path, temp_seg_dir)
 
-                # 3B: Dead-Air / Silence Removal (Jump Cuts) (40% -> 50%)
+                t_dl_seg0 = time.time()
+                assemble_clip_segments(source_url, clip.segments, raw_path, temp_seg_dir)
+                timing_metrics["download"] += (time.time() - t_dl_seg0)
+
+                # 3B: Dead-Air / Silence Removal (Jump Cuts) (FFmpeg Rendering Phase)
                 jumpcut_pct = int(clip_base_pct + clip_span * 0.30)
                 update_job(
                     job_id,
@@ -178,43 +224,35 @@ def run_clipping_job(
                     db_path=db_path,
                 )
                 tightened_path = raw_clips_dir / f"clip_{clip_idx}_tightened.mp4"
+                t_ff_cut0 = time.time()
                 tightened_path, jump_stats = remove_dead_air(
                     raw_path,
                     tightened_path,
                     max_pause_sec=0.35,
                     min_keep_pad_sec=0.08,
                 )
+                timing_metrics["ffmpeg"] += (time.time() - t_ff_cut0)
 
-                # 3C: Smart 9:16 Vertical Reframing & 2-Speaker Split-Screen (50% -> 65%)
+                # 3C: Cinematic 9:16 Vertical Reframing (FFmpeg Blur Fill HW accelerated)
                 reframe_pct = int(clip_base_pct + clip_span * 0.50)
                 update_job(
                     job_id,
                     progress_pct=reframe_pct,
-                    current_step=f"Clip {clip_idx}/{total_clips}: Tracking faces & reframing to 9:16 vertical (split-screen aware)...",
+                    current_step=f"Clip {clip_idx}/{total_clips}: Reframing to 9:16 vertical (cinematic blur fill)...",
                     db_path=db_path,
                 )
                 vertical_path = vertical_clips_dir / f"clip_{clip_idx}_vertical.mp4"
+                t_ff_ref0 = time.time()
                 vertical_path, reframe_info = reframe_to_vertical(
                     tightened_path,
                     vertical_path,
-                    mode="auto",
+                    mode="blur_fill",
                     return_info=True,
                 )
-
-                # 3D: Dynamic Camera Punch-In Zooms (65% -> 72%)
-                zoomed_path = vertical_clips_dir / f"clip_{clip_idx}_zoomed.mp4"
+                timing_metrics["ffmpeg"] += (time.time() - t_ff_ref0)
                 zoom_count = 0
-                if reframe_info.get("layout_mode") != "split_screen":
-                    zoomed_path, zoom_count = apply_dynamic_zooms(
-                        vertical_path,
-                        zoomed_path,
-                        zoom_factor=1.14,
-                        interval_sec=3.5,
-                    )
-                    if zoom_count > 0:
-                        vertical_path = zoomed_path
 
-                # 3E: Word-Level Transcription on the tightened, final vertical video (72% -> 85%)
+                # 3E: Word-Level Transcription on the tightened, final vertical video (Whisper)
                 transcribe_pct = int(clip_base_pct + clip_span * 0.75)
                 update_job(
                     job_id,
@@ -222,12 +260,15 @@ def run_clipping_job(
                     current_step=f"Clip {clip_idx}/{total_clips}: Generating word-level timestamps on tightened audio (faster-whisper)...",
                     db_path=db_path,
                 )
+                t_wh0 = time.time()
                 words = extract_word_timestamps(str(vertical_path))
+                timing_metrics["transcription"] += (time.time() - t_wh0)
+
                 words_path = subtitles_dir / f"clip_{clip_idx}_words.json"
                 with open(words_path, "w", encoding="utf-8") as wf:
                     json.dump(words, wf, indent=2)
 
-                # 3F: Dynamic Karaoke .ass & Burn-in (85% -> 95%)
+                # 3F: Dynamic Karaoke .ass & Burn-in (FFmpeg libass HW accelerated)
                 burn_pct = int(clip_base_pct + clip_span * 0.90)
                 update_job(
                     job_id,
@@ -239,31 +280,33 @@ def run_clipping_job(
                 generate_ass_subtitles(words, ass_path)
 
                 final_video_path = final_clips_dir / f"clip_{clip_idx}_final.mp4"
+                t_ff_burn0 = time.time()
                 burn_captions(str(vertical_path), words, ass_path, str(final_video_path))
+                timing_metrics["ffmpeg"] += (time.time() - t_ff_burn0)
 
                 # 3G: Extract Preview Thumbnail
                 preview_image_path = previews_dir / f"clip_{clip_idx}_preview.jpg"
                 final_dur, _, _ = probe_video_durations(final_video_path)
                 sample_time = min(2.5, max(0.5, final_dur / 4.0))
+                t_ff_th0 = time.time()
                 try:
                     extract_preview_frame(final_video_path, preview_image_path, timestamp=sample_time)
                 except Exception as pe:
                     logger.warning(f"Could not extract preview frame at {sample_time}s: {pe}, using 0.5s")
                     extract_preview_frame(final_video_path, preview_image_path, timestamp=0.5)
+                timing_metrics["ffmpeg"] += (time.time() - t_ff_th0)
 
                 # 3H: Compute metrics, assemble edit_stats & add to DB
                 file_size_mb = round(os.path.getsize(final_video_path) / (1024 * 1024), 2)
-                layout_mode = (
-                    "split_screen"
-                    if reframe_info.get("layout_mode") == "split_screen"
-                    else ("dynamic_zoom" if zoom_count > 0 else "single_tracked")
-                )
+                layout_mode = reframe_info.get("layout_mode", "blur_fill")
                 edit_stats = {
                     "jump_cuts_count": jump_stats.get("jump_cuts_count", 0),
                     "dead_air_removed_sec": jump_stats.get("dead_air_removed_sec", 0.0),
                     "layout_mode": layout_mode,
                     "segments_count": len(clip.segments),
                     "dynamic_zooms_count": zoom_count,
+                    "hook_strategy": getattr(clip, "hook_strategy", ""),
+                    "peak_moment": getattr(clip, "peak_moment", ""),
                 }
 
                 clip_record = {
@@ -285,6 +328,18 @@ def run_clipping_job(
                 }
                 add_clip(job_id, clip_record, db_path=db_path)
                 successful_clips += 1
+
+                # 3I: Immediate Intermediate Artifact Cleanup (prevent SSD choke)
+                if Path(temp_seg_dir).exists():
+                    shutil.rmtree(temp_seg_dir, ignore_errors=True)
+                for intermediate_file in [raw_path, tightened_path, vertical_path]:
+                    p = Path(intermediate_file) if intermediate_file else None
+                    if p and p.exists():
+                        try:
+                            p.unlink()
+                            logger.info(f"[{job_id}] Cleaned up intermediate artifact: {p.name}")
+                        except Exception as ce:
+                            logger.warning(f"Could not remove intermediate artifact {p}: {ce}")
 
                 # Update progress
                 finish_pct = int(clip_base_pct + clip_span)
@@ -310,7 +365,7 @@ def run_clipping_job(
             raise RuntimeError(f"All clips failed during processing: {combined_err}")
 
         # ---------------------------------------------------------
-        # STEP 4: Completed (100%)
+        # STEP 4: Completed (100%) & Performance Telemetry
         # ---------------------------------------------------------
         now_iso = datetime.now(timezone.utc).isoformat()
         finish_message = (
@@ -326,7 +381,39 @@ def run_clipping_job(
             completed_at=now_iso,
             db_path=db_path,
         )
-        logger.info(f"[{job_id}] Pipeline completed with {successful_clips}/{total_clips} clips")
+
+        total_job_time = time.time() - t_job_start
+        telemetry_summary = {
+            "job_id": job_id,
+            "total_elapsed_sec": round(total_job_time, 2),
+            "phase_1_download_sec": round(timing_metrics["download"], 2),
+            "phase_2_transcription_sec": round(timing_metrics["transcription"], 2),
+            "phase_3_llm_hooks_sec": round(timing_metrics["llm_hooks"], 2),
+            "phase_4_ffmpeg_rendering_sec": round(timing_metrics["ffmpeg"], 2),
+            "successful_clips": successful_clips,
+            "total_clips": total_clips,
+        }
+        with open(job_dir / "telemetry.json", "w", encoding="utf-8") as tf:
+            json.dump(telemetry_summary, tf, indent=2)
+
+        pct_dl = (timing_metrics["download"] / total_job_time * 100) if total_job_time > 0 else 0
+        pct_tx = (timing_metrics["transcription"] / total_job_time * 100) if total_job_time > 0 else 0
+        pct_llm = (timing_metrics["llm_hooks"] / total_job_time * 100) if total_job_time > 0 else 0
+        pct_ff = (timing_metrics["ffmpeg"] / total_job_time * 100) if total_job_time > 0 else 0
+
+        logger.info(
+            f"\n"
+            f"======================================================================\n"
+            f"  PERFORMANCE AUDIT & TELEMETRY SUMMARY - Job [{job_id}]\n"
+            f"======================================================================\n"
+            f"  1. Download Phase (yt-dlp stream slices & meta):   {timing_metrics['download']:>6.2f}s ({pct_dl:>5.1f}%)\n"
+            f"  2. Transcription Phase (YT API + Whisper int8): {timing_metrics['transcription']:>6.2f}s ({pct_tx:>5.1f}%)\n"
+            f"  3. LLM Hooks Phase (Gemini Waterfall):          {timing_metrics['llm_hooks']:>6.2f}s ({pct_llm:>5.1f}%)\n"
+            f"  4. FFmpeg Rendering Phase (Apple Silicon HW):    {timing_metrics['ffmpeg']:>6.2f}s ({pct_ff:>5.1f}%)\n"
+            f"  ----------------------------------------------------------------------\n"
+            f"  Total Pipeline Execution Time:                  {total_job_time:>6.2f}s ({successful_clips}/{total_clips} clips rendered)\n"
+            f"======================================================================"
+        )
 
     except Exception as exc:
         err_msg = f"{type(exc).__name__}: {str(exc)}"

@@ -32,6 +32,7 @@ from pipeline.transcript import (
     get_transcript,
     format_transcript_for_llm,
 )
+from pipeline.downloader import extract_video_heatmap_peaks
 from pipeline.llm_hooks import find_viral_clips
 
 DEFAULT_YOUTUBE_URL = "https://www.youtube.com/watch?v=UF8uR6Z6KLc"  # Steve Jobs Stanford Commencement 2005
@@ -97,12 +98,24 @@ def run_phase1_pipeline(
 
     print("      [SUCCESS] GEMINI_API_KEY detected.")
 
+    # Step 3.5: Heatmap Extraction (Waterfall Priority 1)
+    print(f"\n[3.5/4] Extracting Heatmap Replay Peaks (Waterfall Strategy)...")
+    heatmap_peaks = extract_video_heatmap_peaks(url)
+    if heatmap_peaks:
+        print(f"      [SUCCESS] Found {len(heatmap_peaks)} Crowd-Sourced Virality Peaks:")
+        for p in heatmap_peaks:
+            print(f"      - {p['display']}")
+    else:
+        print("      [INFO] No heatmap found; falling back to Chain-of-Thought Virality Scoring.")
+
     # Step 4: Viral Clip Selection via Gemini
-    print(f"\n[4/4] Running Gemini Viral Hook Selection (Top {num_clips} clips)...")
+    strategy_name = f"Waterfall ({len(heatmap_peaks)} Heatmap Peaks)" if heatmap_peaks else "Chain-of-Thought Virality Scoring"
+    print(f"\n[4/4] Running Gemini Viral Hook Selection [{strategy_name}] (Top {num_clips} clips)...")
     try:
         selection_response = find_viral_clips(
             transcript_text=formatted_text,
             num_clips=num_clips,
+            heatmap_peaks=heatmap_peaks,
         )
         clips = selection_response.clips
         print(f"      [SUCCESS] Gemini selected {len(clips)} viral clips!\n")
@@ -115,6 +128,8 @@ def run_phase1_pipeline(
             print(f"\nClip #{idx}:")
             print(f"  Title:          {clip.title}")
             print(f"  Hook Text:      \"{clip.hook_text}\"")
+            print(f"  Hook Strategy:  {clip.hook_strategy}")
+            print(f"  Peak Moment:    {clip.peak_moment}")
             print(f"  Timestamps:     {clip.start_time:.1f}s - {clip.end_time:.1f}s")
             print(f"  Duration:       {clip.duration:.1f}s")
             print(f"  Virality Score: {clip.virality_score}/100")

@@ -101,6 +101,14 @@ export default function ClipCard({ clip, onPostPublished }: ClipCardProps) {
               </span>
             )}
 
+            {/* Hook Strategy Pill */}
+            {(clip.edit_stats?.hook_strategy || clip.hook_strategy) && (
+              <span className="inline-flex items-center gap-1 rounded-md bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 text-[10px] font-semibold text-emerald-400">
+                <Sparkles className="h-3 w-3 text-emerald-400" />
+                <span>{clip.edit_stats?.hook_strategy || clip.hook_strategy}</span>
+              </span>
+            )}
+
             {/* Layout Mode Pill */}
             {clip.edit_stats.layout_mode === 'split_screen' ? (
               <span className="inline-flex items-center gap-1 rounded-md bg-cyan-500/10 border border-cyan-500/20 px-2 py-0.5 text-[10px] font-semibold text-cyan-400">
@@ -137,6 +145,14 @@ export default function ClipCard({ clip, onPostPublished }: ClipCardProps) {
             &ldquo;{clip.hook_text}&rdquo;
           </p>
         </div>
+
+        {/* Peak Moment Banner */}
+        {(clip.edit_stats?.peak_moment || clip.peak_moment) && (
+          <div className="rounded-xl border border-rose-500/20 bg-rose-950/20 px-3 py-2 text-xs leading-relaxed">
+            <span className="font-semibold text-rose-300">Peak Moment: </span>
+            <span className="text-zinc-300">{clip.edit_stats?.peak_moment || clip.peak_moment}</span>
+          </div>
+        )}
 
         {/* Virality Analysis Accordion */}
         {clip.reasoning && (

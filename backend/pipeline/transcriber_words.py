@@ -6,6 +6,7 @@ timestamps aligned to the clip's local timeline (0.0s to duration).
 
 import json
 import logging
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -18,13 +19,34 @@ logger = logging.getLogger(__name__)
 _WHISPER_MODEL = None
 
 
-def get_whisper_model(model_size: str = "tiny") -> Any:
-    """Initialize or retrieve the cached Faster-Whisper model."""
+def get_whisper_model(model_size: str | None = None) -> Any:
+    """Initialize or retrieve the cached Faster-Whisper model.
+
+    Optimized for high-speed word timestamp extraction:
+    - Defaults to 'base.en' (or 'tiny' via WHISPER_MODEL env).
+    - Probes for GPU/Metal hardware acceleration ('auto' -> 'cuda' -> 'cpu').
+    - Uses compute_type='int8' to minimize RAM and maximize throughput.
+    """
     global _WHISPER_MODEL
     if _WHISPER_MODEL is None:
+        target_model = model_size or os.getenv("WHISPER_MODEL", "base.en")
         from faster_whisper import WhisperModel
-        logger.info(f"Loading faster-whisper model '{model_size}' (CPU/int8)...")
-        _WHISPER_MODEL = WhisperModel(model_size, device="cpu", compute_type="int8")
+
+        loaded = None
+        for device in ["auto", "cuda", "cpu"]:
+            try:
+                logger.info(f"Loading faster-whisper model '{target_model}' on device='{device}' (compute_type='int8')...")
+                loaded = WhisperModel(target_model, device=device, compute_type="int8")
+                logger.info(f"Successfully loaded faster-whisper model '{target_model}' on device='{device}'")
+                break
+            except Exception as exc:
+                logger.warning(f"Could not load faster-whisper on device='{device}': {exc}. Trying fallback...")
+
+        if loaded is None:
+            logger.info(f"Fallback: loading faster-whisper model '{target_model}' on CPU...")
+            loaded = WhisperModel(target_model, device="cpu", compute_type="int8")
+
+        _WHISPER_MODEL = loaded
     return _WHISPER_MODEL
 
 
@@ -55,7 +77,7 @@ def load_audio_pcm_ffmpeg(file_path: str | Path, sr: int = 16000) -> np.ndarray:
 def extract_word_timestamps(
     video_path: str | Path,
     clip_metadata: dict[str, Any] | None = None,
-    model_size: str = "tiny",
+    model_size: str = "base.en",
 ) -> list[dict[str, Any]]:
     """Extract word-level timestamps for a sliced video clip.
 

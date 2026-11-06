@@ -67,6 +67,8 @@ def init_db(db_path: Path | str = DEFAULT_DB_PATH) -> None:
                 clip_index INTEGER NOT NULL,
                 title TEXT NOT NULL,
                 hook_text TEXT NOT NULL,
+                hook_strategy TEXT,
+                peak_moment TEXT,
                 start_time REAL NOT NULL,
                 end_time REAL NOT NULL,
                 duration REAL NOT NULL,
@@ -81,6 +83,13 @@ def init_db(db_path: Path | str = DEFAULT_DB_PATH) -> None:
                 FOREIGN KEY (job_id) REFERENCES jobs (id) ON DELETE CASCADE
             );
         """)
+
+        # Ensure hook_strategy and peak_moment columns exist on existing databases
+        clip_cols = [c[1] for c in conn.execute("PRAGMA table_info(clips);").fetchall()]
+        if "hook_strategy" not in clip_cols:
+            conn.execute("ALTER TABLE clips ADD COLUMN hook_strategy TEXT;")
+        if "peak_moment" not in clip_cols:
+            conn.execute("ALTER TABLE clips ADD COLUMN peak_moment TEXT;")
 
         # Social Accounts Table
         conn.execute("""
@@ -320,14 +329,21 @@ def add_clip(
     else:
         social_metadata_str = None
 
+    hook_strategy = clip_data.get("hook_strategy") or (
+        raw_edit_stats.get("hook_strategy", "") if isinstance(raw_edit_stats, dict) else ""
+    )
+    peak_moment = clip_data.get("peak_moment") or (
+        raw_edit_stats.get("peak_moment", "") if isinstance(raw_edit_stats, dict) else ""
+    )
+
     with get_db_connection(db_path) as conn:
         conn.execute(
             """
             INSERT INTO clips (
-                id, job_id, clip_index, title, hook_text, start_time, end_time,
-                duration, virality_score, reasoning, video_url, preview_url,
-                subtitles_url, file_size_mb, edit_stats, social_metadata
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                id, job_id, clip_index, title, hook_text, hook_strategy, peak_moment,
+                start_time, end_time, duration, virality_score, reasoning, video_url,
+                preview_url, subtitles_url, file_size_mb, edit_stats, social_metadata
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 clip_id,
@@ -335,6 +351,8 @@ def add_clip(
                 clip_data["clip_index"],
                 clip_data["title"],
                 clip_data["hook_text"],
+                hook_strategy,
+                peak_moment,
                 float(clip_data["start_time"]),
                 float(clip_data["end_time"]),
                 float(clip_data["duration"]),

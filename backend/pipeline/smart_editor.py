@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.pipeline.downloader import download_clip_slice
+from backend.pipeline.reframer import get_h264_encoder_args
 from backend.pipeline.transcriber_words import extract_word_timestamps
 
 logger = logging.getLogger(__name__)
@@ -114,6 +115,7 @@ def assemble_clip_segments(
 
     filter_complex = f"{''.join(filter_inputs)}concat=n={len(downloaded_files)}:v=1:a=1[outv][outa]"
 
+    encoder_args = get_h264_encoder_args("8M")
     cmd = [
         "ffmpeg",
         "-y",
@@ -124,16 +126,11 @@ def assemble_clip_segments(
         "[outv]",
         "-map",
         "[outa]",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "fast",
-        "-crf",
-        "23",
+        *encoder_args,
         "-c:a",
         "aac",
         "-b:a",
-        "128k",
+        "192k",
         str(out_file),
     ]
 
@@ -141,6 +138,16 @@ def assemble_clip_segments(
     res = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if res.returncode != 0:
         raise RuntimeError(f"Multi-segment stitching failed (code {res.returncode}): {res.stderr[-400:]}")
+
+    # Clean up intermediate downloaded subsegments immediately to prevent SSD bloat
+    try:
+        for f in downloaded_files:
+            if f.exists():
+                f.unlink()
+        if t_dir.exists() and not any(t_dir.iterdir()):
+            t_dir.rmdir()
+    except Exception as ce:
+        logger.debug(f"Could not remove subsegment temp files: {ce}")
 
     logger.info(f"Successfully stitched {len(downloaded_files)} sub-segments into: {out_file}")
     return str(out_file)
@@ -273,6 +280,7 @@ def remove_dead_air(
 
     filter_complex = f"{';'.join(filter_parts)};{''.join(concat_inputs)}concat=n={len(intervals)}:v=1:a=1[outv][outa]"
 
+    encoder_args = get_h264_encoder_args("8M")
     cmd = [
         "ffmpeg",
         "-y",
@@ -284,16 +292,11 @@ def remove_dead_air(
         "[outv]",
         "-map",
         "[outa]",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "fast",
-        "-crf",
-        "23",
+        *encoder_args,
         "-c:a",
         "aac",
         "-b:a",
-        "128k",
+        "192k",
         str(out_file),
     ]
 
@@ -367,9 +370,10 @@ def apply_dynamic_zooms(
         f"h='if(mod(floor(t/{interval_sec:.2f}), 2), {crop_h}, 1920)':"
         f"x='if(mod(floor(t/{interval_sec:.2f}), 2), {off_x}, 0)':"
         f"y='if(mod(floor(t/{interval_sec:.2f}), 2), {off_y}, 0)',"
-        f"scale=1080:1920:flags=lanczos[v]"
+        f"scale=1080:1920:flags=lanczos,unsharp=5:5:1.0:5:5:0.0[v]"
     )
 
+    encoder_args = get_h264_encoder_args("8M")
     cmd = [
         "ffmpeg",
         "-y",
@@ -381,14 +385,11 @@ def apply_dynamic_zooms(
         "[v]",
         "-map",
         "0:a?",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "fast",
-        "-crf",
-        "23",
+        *encoder_args,
         "-c:a",
-        "copy",
+        "aac",
+        "-b:a",
+        "192k",
         str(out_file),
     ]
 

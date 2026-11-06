@@ -15,6 +15,8 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
 
+from backend.pipeline.reframer import get_h264_encoder_args
+
 logger = logging.getLogger(__name__)
 
 
@@ -98,7 +100,7 @@ def generate_ass_subtitles(
     highlight_color: str = "&H0000D7FF&",  # Viral Gold/Yellow (BGR)
     primary_color: str = "&H00FFFFFF&",    # Crisp White (BGR)
     outline_color: str = "&H00000000&",    # Solid Black (BGR)
-    margin_v: int = 420,                   # Safe zone above bottom controls
+    margin_v: int = 320,                   # Lower-third blurred zone below main 16:9 video
 ) -> str:
     """Generate an Advanced SubStation Alpha (.ass) file with dynamic karaoke highlights.
 
@@ -111,7 +113,8 @@ def generate_ass_subtitles(
         highlight_color: ASS color code for active word.
         primary_color: ASS color code for inactive words.
         outline_color: ASS color code for text outline.
-        margin_v: Vertical margin from bottom (safe zone).
+        margin_v: Vertical margin from bottom in pixels (default: 320, perfectly centered
+                  in the lower-third blurred region below 16:9 footage at y=1264 and above mobile controls).
 
     Returns:
         Absolute path to the generated .ass file.
@@ -247,6 +250,7 @@ def render_captions_pillow_fallback(
         "-f", "rawvideo", "-pix_fmt", "bgr24", "-"
     ]
     # FFmpeg writer (raw video in + audio from input)
+    encoder_args = get_h264_encoder_args("8M")
     write_cmd = [
         "ffmpeg", "-y",
         "-f", "rawvideo", "-vcodec", "rawvideo",
@@ -254,8 +258,8 @@ def render_captions_pillow_fallback(
         "-r", str(fps), "-i", "-",
         "-i", str(in_path),
         "-map", "0:v", "-map", "1:a?",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-        "-c:a", "aac", "-b:a", "128k",
+        *encoder_args,
+        "-c:a", "aac", "-b:a", "192k",
         str(out_path)
     ]
 
@@ -264,7 +268,7 @@ def render_captions_pillow_fallback(
 
     frame_bytes = width * height * 3
     frame_idx = 0
-    margin_v = 420
+    margin_v = 320  # Lower-third blurred zone below main 16:9 footage
 
     while True:
         raw_frame = read_proc.stdout.read(frame_bytes)
@@ -354,6 +358,7 @@ def burn_captions(
     # Escape path characters for FFmpeg filter graph
     escaped_sub_path = str(sub_path).replace("\\", "/").replace(":", "\\:")
 
+    encoder_args = get_h264_encoder_args("8M")
     cmd = [
         "ffmpeg",
         "-y",
@@ -361,14 +366,11 @@ def burn_captions(
         str(in_path),
         "-vf",
         f"ass='{escaped_sub_path}'",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "fast",
-        "-crf",
-        "23",
+        *encoder_args,
         "-c:a",
-        "copy",
+        "aac",
+        "-b:a",
+        "192k",
         str(out_path),
     ]
 

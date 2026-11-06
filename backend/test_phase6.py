@@ -51,14 +51,14 @@ def test_1_multisegment_schema():
         title="Stanford Commencement Advice #Shorts",
         hook_text="You can't connect the dots looking forward...",
         start_time=10.0,
-        end_time=45.0,
+        end_time=58.0,
         virality_score=94,
         reasoning="Inspirational classic narrative.",
     )
     assert len(flat_clip.segments) == 1, "Expected single segment auto-wrap"
     assert flat_clip.segments[0].segment_role == "core_insight"
-    assert flat_clip.duration == 35.0, f"Expected duration 35.0, got {flat_clip.duration}"
-    print("✓ Auto-wrap flat clip into 1 ClipSegment passed: duration = 35.0s")
+    assert flat_clip.duration == 48.0, f"Expected duration 48.0, got {flat_clip.duration}"
+    print("✓ Auto-wrap flat clip into 1 ClipSegment passed: duration = 48.0s")
 
     # Test B: Non-linear multi-segment stitching with cold-open hook
     stitched_clip = ViralClip(
@@ -67,13 +67,13 @@ def test_1_multisegment_schema():
         segments=[
             ClipSegment(start_time=85.0, end_time=89.5, segment_role="cold_open_hook"),
             ClipSegment(start_time=12.0, end_time=25.0, segment_role="story_setup"),
-            ClipSegment(start_time=45.0, end_time=60.0, segment_role="climax_payoff"),
+            ClipSegment(start_time=45.0, end_time=75.0, segment_role="climax_payoff"),
         ],
         virality_score=98,
         reasoning="Cold-open teaser hooks viewer before revealing journey.",
     )
     assert len(stitched_clip.segments) == 3, f"Expected 3 segments, got {len(stitched_clip.segments)}"
-    expected_dur = round((89.5 - 85.0) + (25.0 - 12.0) + (60.0 - 45.0), 2)  # 4.5 + 13.0 + 15.0 = 32.5s
+    expected_dur = round((89.5 - 85.0) + (25.0 - 12.0) + (75.0 - 45.0), 2)  # 4.5 + 13.0 + 30.0 = 47.5s
     assert stitched_clip.duration == expected_dur, f"Expected {expected_dur}s, got {stitched_clip.duration}s"
     assert stitched_clip.start_time == 12.0, f"Expected min start 12.0, got {stitched_clip.start_time}"
     assert stitched_clip.end_time == 89.5, f"Expected max end 89.5, got {stitched_clip.end_time}"
