@@ -12,6 +12,34 @@ export interface EditStats {
   peak_moment?: string;
 }
 
+export interface ClipSegment {
+  start_time: number;
+  end_time: number;
+  segment_role?: string;
+}
+
+export interface ContentProfile {
+  primary_vibe: string;
+  secondary_vibes: string[];
+  confidence: number;
+  summary: string;
+  energy: string;
+}
+
+export interface ClipOption {
+  title: string;
+  hook_text: string;
+  hook_strategy?: string;
+  peak_moment?: string;
+  virality_score: number;
+  reasoning?: string;
+  segments?: ClipSegment[];
+  start_time: number;
+  end_time: number;
+  duration: number;
+  social_metadata?: SocialMetadata;
+}
+
 export interface SocialMetadata {
   youtube_title: string;
   youtube_description: string;
@@ -83,6 +111,7 @@ export type JobStatus =
   | 'queued'
   | 'extracting_transcript'
   | 'selecting_hooks'
+  | 'awaiting_selection'
   | 'processing_clips'
   | 'completed'
   | 'failed';
@@ -96,6 +125,9 @@ export interface Job {
   progress_pct: number;
   current_step: string;
   error_message?: string | null;
+  content_profile?: ContentProfile | null;
+  options_json?: ClipOption[] | string | null;
+  edit_style?: 'strict' | 'remix';
   created_at: string;
   completed_at?: string | null;
   clips: Clip[];
@@ -155,6 +187,87 @@ export async function createJob(sourceUrl: string, numClips: number = 3): Promis
   if (!res.ok) {
     const errorBody = await res.json().catch(() => ({ detail: 'Unknown error' }));
     throw new Error(errorBody.detail || `Failed to create job (${res.status})`);
+  }
+
+  return res.json();
+}
+
+/**
+ * Normalize the options field (array or JSON string) into clip options.
+ */
+export function getJobOptions(job: Job | null | undefined): ClipOption[] {
+  if (!job || !job.options_json) return [];
+  if (Array.isArray(job.options_json)) return job.options_json;
+  try {
+    const parsed = JSON.parse(job.options_json);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Start the analyze phase. No video is downloaded or rendered yet.
+ */
+export async function createAnalysisJob(
+  sourceUrl: string,
+  numOptions: number = 3,
+  vibe?: string,
+  editStyle: 'strict' | 'remix' = 'strict'
+): Promise<Job> {
+  const res = await fetch(`${API_BASE}/api/jobs/analyze`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      source_url: sourceUrl.trim(),
+      num_options: numOptions,
+      vibe: vibe || null,
+      edit_style: editStyle,
+    }),
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({ detail: 'Unknown error' }));
+    throw new Error(errorBody.detail || `Failed to start analysis (${res.status})`);
+  }
+
+  return res.json();
+}
+
+/**
+ * Render the clip options the user selected during the analyze phase.
+ */
+export async function renderSelectedOptions(
+  jobId: string,
+  optionIndices: number[]
+): Promise<Job> {
+  const res = await fetch(`${API_BASE}/api/jobs/${encodeURIComponent(jobId)}/render`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ option_indices: optionIndices }),
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({ detail: 'Failed to start render' }));
+    throw new Error(errorBody.detail || `Failed to start render (${res.status})`);
+  }
+
+  return res.json();
+}
+
+/**
+ * Re-run analysis to get fresh options, optionally forcing a vibe.
+ */
+export async function regenerateJobOptions(jobId: string, vibe?: string): Promise<Job> {
+  const res = await fetch(`${API_BASE}/api/jobs/${encodeURIComponent(jobId)}/regenerate-options`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ vibe: vibe || null }),
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({ detail: 'Failed to regenerate options' }));
+    throw new Error(errorBody.detail || `Failed to regenerate options (${res.status})`);
   }
 
   return res.json();

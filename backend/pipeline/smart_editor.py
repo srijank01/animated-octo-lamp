@@ -267,6 +267,7 @@ def remove_dead_air(
             "dead_air_removed_sec": 0.0,
             "original_duration": round(total_dur, 2),
             "final_duration": round(total_dur, 2),
+            "kept_intervals": [[0.0, round(total_dur, 3)]],
         }
 
     # Construct single-pass FFmpeg trim filter
@@ -314,6 +315,7 @@ def remove_dead_air(
             "dead_air_removed_sec": 0.0,
             "original_duration": round(total_dur, 2),
             "final_duration": round(total_dur, 2),
+            "kept_intervals": [[0.0, round(total_dur, 3)]],
         }
 
     final_dur, v_dur, a_dur = probe_video_durations(out_file)
@@ -329,7 +331,54 @@ def remove_dead_air(
         "dead_air_removed_sec": actual_removed,
         "original_duration": round(total_dur, 2),
         "final_duration": round(final_dur, 2),
+        "kept_intervals": [[round(s, 3), round(e, 3)] for s, e in intervals],
     }
+
+
+def remap_words_after_cuts(
+    words: list[dict[str, Any]],
+    kept_intervals: list[list[float]] | None,
+) -> list[dict[str, Any]]:
+    """Shift word timestamps from the original timeline onto the cut timeline.
+
+    ``remove_dead_air`` concatenates the kept intervals, so every word after a
+    removed gap moves earlier. This function applies that same mapping, letting
+    us reuse a single Whisper transcription for caption generation instead of
+    transcribing the tightened video a second time.
+    """
+    if not words:
+        return []
+    if not kept_intervals:
+        return list(words)
+
+    remapped: list[dict[str, Any]] = []
+    for interval_start, interval_end in kept_intervals:
+        offset_start = float(interval_start)
+        for w in words:
+            w_start = float(w.get("start", 0.0))
+            w_end = float(w.get("end", w_start))
+            if w_end <= interval_start or w_start >= interval_end:
+                continue
+            new_start = max(0.0, w_start - offset_start + _interval_offset(kept_intervals, interval_start))
+            new_end = max(new_start + 0.05, min(interval_end, w_end) - offset_start + _interval_offset(kept_intervals, interval_start))
+            remapped.append({
+                "word": str(w.get("word", "")).strip(),
+                "start": round(new_start, 3),
+                "end": round(new_end, 3),
+            })
+
+    remapped.sort(key=lambda item: item["start"])
+    return [w for w in remapped if w["word"]]
+
+
+def _interval_offset(kept_intervals: list[list[float]], interval_start: float) -> float:
+    """Return the concatenated-timeline offset at the start of an interval."""
+    offset = 0.0
+    for s, e in kept_intervals:
+        if abs(float(s) - float(interval_start)) < 1e-6:
+            return offset
+        offset += max(0.0, float(e) - float(s))
+    return offset
 
 
 def apply_dynamic_zooms(

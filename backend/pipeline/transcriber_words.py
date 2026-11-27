@@ -24,16 +24,23 @@ def get_whisper_model(model_size: str | None = None) -> Any:
 
     Optimized for high-speed word timestamp extraction:
     - Defaults to 'base.en' (or 'tiny' via WHISPER_MODEL env).
-    - Probes for GPU/Metal hardware acceleration ('auto' -> 'cuda' -> 'cpu').
+    - Defaults to CPU; set WHISPER_DEVICE=cuda (or 'auto') to opt into GPU.
+      CUDA is opt-in because 'auto' can load successfully yet fail later with
+      "Library libcublas.so.12 is not found" when the runtime libraries are absent.
     - Uses compute_type='int8' to minimize RAM and maximize throughput.
     """
     global _WHISPER_MODEL
     if _WHISPER_MODEL is None:
         target_model = model_size or os.getenv("WHISPER_MODEL", "base.en")
+        requested_device = os.getenv("WHISPER_DEVICE", "cpu").strip().lower() or "cpu"
         from faster_whisper import WhisperModel
 
+        devices = [requested_device]
+        if requested_device != "cpu":
+            devices.append("cpu")
+
         loaded = None
-        for device in ["auto", "cuda", "cpu"]:
+        for device in devices:
             try:
                 logger.info(f"Loading faster-whisper model '{target_model}' on device='{device}' (compute_type='int8')...")
                 loaded = WhisperModel(target_model, device=device, compute_type="int8")
@@ -99,40 +106,60 @@ def extract_word_timestamps(
     if len(audio_arr) == 0:
         raise ValueError(f"Extracted empty audio stream from: {in_path}")
 
-    model = get_whisper_model(model_size)
-    segments, info = model.transcribe(
-        audio_arr,
+    def _collect_words(segments_iter: Any) -> list[dict[str, Any]]:
+        collected: list[dict[str, Any]] = []
+        for segment in segments_iter:
+            if segment.words:
+                for word_obj in segment.words:
+                    w_text = word_obj.word.strip()
+                    if w_text:
+                        collected.append({
+                            "word": w_text,
+                            "start": float(word_obj.start),
+                            "end": float(word_obj.end),
+                        })
+            else:
+                # Fallback if segment has no word breakdown: split by whitespace
+                words_in_seg = segment.text.strip().split()
+                if words_in_seg:
+                    seg_dur = max(0.2, float(segment.end - segment.start))
+                    per_word_dur = seg_dur / len(words_in_seg)
+                    for idx, w in enumerate(words_in_seg):
+                        w_start = float(segment.start) + idx * per_word_dur
+                        w_end = w_start + per_word_dur
+                        collected.append({
+                            "word": w.strip(),
+                            "start": w_start,
+                            "end": w_end,
+                        })
+        return collected
+
+    transcribe_kwargs = dict(
         word_timestamps=True,
         language="en",
         vad_filter=True,
         vad_parameters=dict(min_silence_duration_ms=250),
     )
 
-    raw_words: list[dict[str, Any]] = []
-    for segment in segments:
-        if segment.words:
-            for word_obj in segment.words:
-                w_text = word_obj.word.strip()
-                if w_text:
-                    raw_words.append({
-                        "word": w_text,
-                        "start": float(word_obj.start),
-                        "end": float(word_obj.end),
-                    })
-        else:
-            # Fallback if segment has no word breakdown: split by whitespace
-            words_in_seg = segment.text.strip().split()
-            if words_in_seg:
-                seg_dur = max(0.2, float(segment.end - segment.start))
-                per_word_dur = seg_dur / len(words_in_seg)
-                for idx, w in enumerate(words_in_seg):
-                    w_start = float(segment.start) + idx * per_word_dur
-                    w_end = w_start + per_word_dur
-                    raw_words.append({
-                        "word": w.strip(),
-                        "start": w_start,
-                        "end": w_end,
-                    })
+    model = get_whisper_model(model_size)
+    try:
+        segments, info = model.transcribe(audio_arr, **transcribe_kwargs)
+        raw_words = _collect_words(segments)
+    except RuntimeError as exc:
+        # CUDA can load lazily and fail on first inference (e.g. missing
+        # libcublas.so.12). Retry once on CPU instead of failing the clip.
+        message = str(exc).lower()
+        if "libcublas" not in message and "cuda" not in message:
+            raise
+        logger.warning(
+            "Faster-whisper GPU inference failed (%s). Falling back to CPU...", exc
+        )
+        global _WHISPER_MODEL
+        _WHISPER_MODEL = None
+        os.environ["WHISPER_DEVICE"] = "cpu"
+        model = get_whisper_model(model_size)
+        segments, info = model.transcribe(audio_arr, **transcribe_kwargs)
+        raw_words = _collect_words(segments)
 
     if not raw_words and clip_metadata and "hook_text" in clip_metadata:
         # Fallback to hook text proportional distribution

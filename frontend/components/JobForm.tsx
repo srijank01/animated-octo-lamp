@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import { Sparkles, Loader2, ArrowRight, AlertCircle } from 'lucide-react';
-import { createJob, Job } from '@/lib/api';
+import { createAnalysisJob, Job } from '@/lib/api';
 
 function YoutubeIcon({ className }: { className?: string }) {
   return (
@@ -22,6 +22,7 @@ const DEMO_URL = 'https://www.youtube.com/watch?v=UF8uR6Z6KLc';
 export default function JobForm({ onJobCreated, isProcessing }: JobFormProps) {
   const [url, setUrl] = useState('');
   const [numClips, setNumClips] = useState(3);
+  const [editStyle, setEditStyle] = useState<'strict' | 'remix'>('strict');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -35,7 +36,7 @@ export default function JobForm({ onJobCreated, isProcessing }: JobFormProps) {
     try {
       setLoading(true);
       setError(null);
-      const newJob = await createJob(url, numClips);
+      const newJob = await createAnalysisJob(url, numClips, undefined, editStyle);
       onJobCreated(newJob);
       setUrl('');
     } catch (err: unknown) {
@@ -108,7 +109,7 @@ export default function JobForm({ onJobCreated, isProcessing }: JobFormProps) {
           <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-1">
             {/* Target Clips Selector */}
             <div className="flex items-center gap-2.5 w-full sm:w-auto">
-              <span className="text-xs font-semibold text-zinc-400">Output Clips:</span>
+              <span className="text-xs font-semibold text-zinc-400">Output Clips (≤30s):</span>
               <div className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-950/80 p-1">
                 {[1, 2, 3, 5].map((n) => (
                   <button
@@ -128,6 +129,28 @@ export default function JobForm({ onJobCreated, isProcessing }: JobFormProps) {
               </div>
             </div>
 
+            {/* Style toggle */}
+            <div className="flex items-center gap-2.5 w-full sm:w-auto">
+              <span className="text-xs font-semibold text-zinc-400">Style:</span>
+              <div className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-950/80 p-1">
+                {(['strict', 'remix'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setEditStyle(mode)}
+                    disabled={loading || isProcessing}
+                    className={`h-7 px-3 rounded-lg text-xs font-semibold capitalize transition-all ${
+                      editStyle === mode
+                        ? 'bg-gradient-to-r from-rose-500 to-amber-500 text-white shadow-sm shadow-rose-500/20'
+                        : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900'
+                    }`}
+                  >
+                    {mode}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             {/* Submit Action */}
             <button
               type="submit"
@@ -137,12 +160,12 @@ export default function JobForm({ onJobCreated, isProcessing }: JobFormProps) {
               {loading ? (
                 <>
                   <Loader2 className="h-4 w-4 animate-spin" />
-                  <span>Submitting Project...</span>
+                  <span>Analyzing Video...</span>
                 </>
               ) : (
                 <>
                   <Sparkles className="h-4 w-4" />
-                  <span>Generate Viral Clips</span>
+                  <span>Analyze &amp; Pick Clips</span>
                   <ArrowRight className="h-4 w-4" />
                 </>
               )}
