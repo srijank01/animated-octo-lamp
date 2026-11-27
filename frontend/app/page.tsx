@@ -11,6 +11,7 @@ import {
 import Navbar from '@/components/Navbar';
 import JobForm from '@/components/JobForm';
 import JobProgress from '@/components/JobProgress';
+import ClipSelectionPanel from '@/components/ClipSelectionPanel';
 import ClipCard from '@/components/ClipCard';
 import SocialQueue from '@/components/SocialQueue';
 import { getJobs, deleteJob, Job, getJobById } from '@/lib/api';
@@ -109,6 +110,22 @@ export default function Dashboard() {
     setJobs((prev) =>
       prev.map((j) => (j.id === updatedJob.id ? { ...j, ...updatedJob } : j))
     );
+    // Analysis finished: hand control to the clip selection panel.
+    if (updatedJob.status === 'awaiting_selection') {
+      setActiveJobId((current) => (current === updatedJob.id ? null : current));
+    }
+    // (Re)analysis started: show the live progress tracker.
+    if (updatedJob.status === 'extracting_transcript' || updatedJob.status === 'selecting_hooks') {
+      setActiveJobId(updatedJob.id);
+    }
+  };
+
+  const handleRenderStarted = (renderingJob: Job) => {
+    setJobs((prev) =>
+      prev.map((j) => (j.id === renderingJob.id ? { ...j, ...renderingJob } : j))
+    );
+    setSelectedJobId(renderingJob.id);
+    setActiveJobId(renderingJob.id);
   };
 
   const handleJobCompleted = async (completedJob: Job) => {
@@ -270,6 +287,17 @@ export default function Dashboard() {
               </section>
             )}
 
+            {/* Analyze Results: vibe + selectable clip options */}
+            {selectedJob && selectedJob.status === 'awaiting_selection' && (
+              <section className="animate-in fade-in slide-in-from-top-4 duration-300">
+                <ClipSelectionPanel
+                  job={selectedJob}
+                  onJobUpdated={handleJobUpdated}
+                  onRenderStarted={handleRenderStarted}
+                />
+              </section>
+            )}
+
             {/* Projects & Clips Section */}
             <section className="space-y-6">
               {/* Project Selection Tabs */}
@@ -282,7 +310,10 @@ export default function Dashboard() {
                   <div className="flex items-center gap-2.5 overflow-x-auto pb-2 scrollbar-none">
                     {jobs.map((job) => {
                       const isSelected = job.id === selectedJobId;
-                      const isRunning = job.status !== 'completed' && job.status !== 'failed';
+                      const isRunning =
+                        job.status !== 'completed' &&
+                        job.status !== 'failed' &&
+                        job.status !== 'awaiting_selection';
                       return (
                         <div
                           key={job.id}

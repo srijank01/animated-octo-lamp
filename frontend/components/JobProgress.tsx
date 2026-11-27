@@ -26,6 +26,11 @@ const STATUS_LABELS: Record<JobStatus, { label: string; color: string; icon: Rea
     color: 'border-purple-500/30 bg-purple-500/10 text-purple-400',
     icon: Sparkles,
   },
+  awaiting_selection: {
+    label: 'Options Ready',
+    color: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400',
+    icon: Sparkles,
+  },
   processing_clips: {
     label: 'Generating 9:16 Shorts',
     color: 'border-amber-500/30 bg-amber-500/10 text-amber-400',
@@ -72,6 +77,9 @@ export default function JobProgress({ jobId, onJobCompleted, onJobUpdated }: Job
         } else if (data.status === 'failed') {
           setError(data.error_message || 'Job failed during execution.');
           if (pollInterval) clearInterval(pollInterval);
+        } else if (data.status === 'awaiting_selection') {
+          // Analysis is done; the selection panel takes over from here.
+          if (pollInterval) clearInterval(pollInterval);
         }
       } catch (err: unknown) {
         if (!isMounted) return;
@@ -104,7 +112,10 @@ export default function JobProgress({ jobId, onJobCompleted, onJobUpdated }: Job
 
   const statusMeta = STATUS_LABELS[job.status] || STATUS_LABELS.queued;
   const StatusIcon = statusMeta.icon;
-  const isFinished = job.status === 'completed' || job.status === 'failed';
+  const isFinished =
+    job.status === 'completed' ||
+    job.status === 'failed' ||
+    job.status === 'awaiting_selection';
 
   return (
     <div className="relative overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/90 p-5 sm:p-6 shadow-xl backdrop-blur-md">

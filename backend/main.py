@@ -43,6 +43,7 @@ from backend.database import (
     init_db,
     seed_from_phase3_if_empty,
     update_clip_metadata,
+    update_job,
     upsert_social_account,
 )
 from backend.pipeline.llm_hooks import generate_social_metadata_for_clip
@@ -126,6 +127,45 @@ class CreateJobRequest(BaseModel):
     )
 
 
+class AnalyzeJobRequest(BaseModel):
+    source_url: str = Field(
+        ...,
+        description="YouTube video URL to analyze (no video is downloaded)",
+        examples=["https://www.youtube.com/watch?v=UF8uR6Z6KLc"],
+    )
+    num_options: int = Field(
+        default=3,
+        ge=1,
+        le=5,
+        description="Number of clip options to propose (1-5)",
+    )
+    vibe: str | None = Field(
+        default=None,
+        description="Optional vibe override: funny, motivational, emotional, sad, romantic, educational, controversial, dramatic, wholesome, shocking, informative",
+    )
+    edit_style: str = Field(
+        default="strict",
+        pattern="^(strict|remix)$",
+        description="strict = one continuous sentence-aligned clip (default); remix = cold opens/multi-segment",
+    )
+
+
+class RenderSelectionRequest(BaseModel):
+    option_indices: list[int] = Field(
+        ...,
+        min_length=1,
+        max_length=5,
+        description="Indices (0-based) of the analysis options to render",
+    )
+
+
+class RegenerateOptionsRequest(BaseModel):
+    vibe: str | None = Field(
+        default=None,
+        description="Optional new vibe to force when regenerating options",
+    )
+
+
 # -----------------------------------------------------------------------------
 # Endpoints
 # -----------------------------------------------------------------------------
@@ -202,6 +242,133 @@ def create_clipping_job(
 
     logger.info(f"Dispatched background clipping job {job['id']} for {request.source_url}")
     return job
+
+
+@app.post("/api/jobs/analyze", status_code=status.HTTP_201_CREATED, tags=["Jobs"])
+def analyze_clipping_job(
+    request: AnalyzeJobRequest,
+    background_tasks: BackgroundTasks,
+) -> dict[str, Any]:
+    """Analyze a video and return vibe + clip options WITHOUT rendering.
+
+    The user then chooses options and calls ``/api/jobs/{id}/render``.
+    """
+    try:
+        video_id = extract_video_id(request.source_url)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid YouTube URL: {e}",
+        )
+
+    job = create_job(
+        source_url=request.source_url,
+        video_id=video_id,
+        num_clips=request.num_options,
+        edit_style=request.edit_style,
+        db_path=DEFAULT_DB_PATH,
+    )
+
+    from backend.orchestrator import analyze_video_job
+
+    background_tasks.add_task(
+        analyze_video_job,
+        job_id=job["id"],
+        source_url=request.source_url,
+        num_options=request.num_options,
+        vibe_override=request.vibe,
+        edit_style=request.edit_style,
+        db_path=DEFAULT_DB_PATH,
+    )
+
+    logger.info(f"Dispatched analysis job {job['id']} for {request.source_url}")
+    return job
+
+
+@app.post("/api/jobs/{job_id}/render", tags=["Jobs"])
+def render_selected_job_options(
+    job_id: str,
+    request: RenderSelectionRequest,
+    background_tasks: BackgroundTasks,
+) -> dict[str, Any]:
+    """Render only the analysis options selected by the user."""
+    job = get_job(job_id, db_path=DEFAULT_DB_PATH)
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with id '{job_id}' not found.",
+        )
+    if job.get("status") != "awaiting_selection":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Job is not ready for rendering (status: {job.get('status')}). Analyze the video first.",
+        )
+
+    from backend.orchestrator import render_selected_clips
+
+    update_job(
+        job_id,
+        status="processing_clips",
+        progress_pct=30,
+        current_step=f"Queued {len(request.option_indices)} selected clip(s) for rendering...",
+        error_message=None,
+        db_path=DEFAULT_DB_PATH,
+    )
+
+    background_tasks.add_task(
+        render_selected_clips,
+        job_id=job_id,
+        option_indices=request.option_indices,
+        edit_style=job.get("edit_style") or "strict",
+        db_path=DEFAULT_DB_PATH,
+    )
+
+    logger.info(f"Dispatched render for job {job_id}: options={request.option_indices}")
+    return get_job(job_id, db_path=DEFAULT_DB_PATH) or job
+
+
+@app.post("/api/jobs/{job_id}/regenerate-options", tags=["Jobs"])
+def regenerate_job_options(
+    job_id: str,
+    request: RegenerateOptionsRequest,
+    background_tasks: BackgroundTasks,
+) -> dict[str, Any]:
+    """Re-run analysis for an existing job, optionally forcing a new vibe."""
+    job = get_job(job_id, db_path=DEFAULT_DB_PATH)
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with id '{job_id}' not found.",
+        )
+    if job.get("status") not in ("awaiting_selection", "failed"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot regenerate options while job is {job.get('status')}.",
+        )
+
+    from backend.orchestrator import analyze_video_job
+
+    update_job(
+        job_id,
+        status="extracting_transcript",
+        progress_pct=5,
+        current_step="Re-analyzing video for fresh clip options...",
+        error_message=None,
+        db_path=DEFAULT_DB_PATH,
+    )
+
+    background_tasks.add_task(
+        analyze_video_job,
+        job_id=job_id,
+        source_url=job["source_url"],
+        num_options=int(job.get("num_clips") or 3),
+        vibe_override=request.vibe,
+        edit_style=job.get("edit_style") or "strict",
+        db_path=DEFAULT_DB_PATH,
+    )
+
+    logger.info(f"Dispatched option regeneration for job {job_id} (vibe={request.vibe or 'auto'})")
+    return get_job(job_id, db_path=DEFAULT_DB_PATH) or job
 
 
 @app.get("/api/jobs", tags=["Jobs"])

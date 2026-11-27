@@ -55,10 +55,22 @@ def init_db(db_path: Path | str = DEFAULT_DB_PATH) -> None:
                 progress_pct INTEGER NOT NULL DEFAULT 0,
                 current_step TEXT NOT NULL DEFAULT 'Job initialized',
                 error_message TEXT,
+                content_profile TEXT,
+                options_json TEXT,
+                edit_style TEXT NOT NULL DEFAULT 'strict',
                 created_at TEXT NOT NULL,
                 completed_at TEXT
             );
         """)
+
+        # Graceful migrations for analysis columns on existing databases
+        job_cols = [c[1] for c in conn.execute("PRAGMA table_info(jobs);").fetchall()]
+        if "content_profile" not in job_cols:
+            conn.execute("ALTER TABLE jobs ADD COLUMN content_profile TEXT;")
+        if "options_json" not in job_cols:
+            conn.execute("ALTER TABLE jobs ADD COLUMN options_json TEXT;")
+        if "edit_style" not in job_cols:
+            conn.execute("ALTER TABLE jobs ADD COLUMN edit_style TEXT NOT NULL DEFAULT 'strict';")
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS clips (
@@ -190,7 +202,7 @@ def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     if row is None:
         return None
     d = {key: row[key] for key in row.keys()}
-    for json_field in ["edit_stats", "social_metadata", "tags", "credentials_json"]:
+    for json_field in ["edit_stats", "social_metadata", "tags", "credentials_json", "content_profile", "options_json"]:
         if json_field in d and isinstance(d[json_field], str) and d[json_field].strip():
             try:
                 d[json_field] = json.loads(d[json_field])
@@ -207,19 +219,21 @@ def create_job(
     video_id: str | None = None,
     num_clips: int = 3,
     job_id: str | None = None,
+    edit_style: str = "strict",
     db_path: Path | str = DEFAULT_DB_PATH,
 ) -> dict[str, Any]:
     """Create a new job in queued state."""
     job_uuid = job_id or str(uuid.uuid4())
     now_iso = datetime.now(timezone.utc).isoformat()
+    style = "remix" if str(edit_style).lower() == "remix" else "strict"
 
     with get_db_connection(db_path) as conn:
         conn.execute(
             """
-            INSERT INTO jobs (id, source_url, video_id, num_clips, status, progress_pct, current_step, created_at)
-            VALUES (?, ?, ?, ?, 'queued', 0, 'Job queued for processing', ?)
+            INSERT INTO jobs (id, source_url, video_id, num_clips, status, progress_pct, current_step, edit_style, created_at)
+            VALUES (?, ?, ?, ?, 'queued', 0, 'Job queued for processing', ?, ?)
             """,
-            (job_uuid, source_url, video_id, int(num_clips), now_iso),
+            (job_uuid, source_url, video_id, int(num_clips), style, now_iso),
         )
 
     return get_job(job_uuid, db_path=db_path)  # type: ignore[return-value]
@@ -238,6 +252,9 @@ def update_job(
         "error_message",
         "video_id",
         "completed_at",
+        "content_profile",
+        "options_json",
+        "edit_style",
     }
     updates = {k: v for k, v in kwargs.items() if k in allowed_fields}
     if not updates:
